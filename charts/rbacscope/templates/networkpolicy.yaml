@@ -16,4 +16,14 @@ spec:
         {{- toYaml .Values.networkPolicy.ingressFrom | nindent 8 }}
       ports:
         - port: 9090
+    {{- if .Values.auditWebhook.enabled }}
+    # Audit receiver: the API server is usually host-networked, so allow it explicitly
+    # (or any source when allowFrom is empty; the bearer token is still enforced).
+    - ports:
+        - port: {{ .Values.auditWebhook.port }}
+      {{- with .Values.auditWebhook.allowFrom }}
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    {{- end }}
 {{- end }}

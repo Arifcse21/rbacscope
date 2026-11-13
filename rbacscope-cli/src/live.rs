@@ -146,3 +146,40 @@ pub fn fetch_blocking(opts: &LiveOptions) -> Result<(String, String)> {
 pub fn block_on<F: std::future::Future>(f: F) -> Result<F::Output> {
     Ok(runtime()?.block_on(f))
 }
+
+/// Read the audit usage collected by a running `rbacscope serve` (from `/audit/state`).
+/// Used by `generate`/`unused --audit-server` when run with `kubectl exec` in the exporter pod.
+pub fn fetch_audit_state(base_url: &str) -> Result<rbacscope_core::audit::AuditLog> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let authority = base_url
+        .strip_prefix("http://")
+        .context("--audit-server must be an http:// URL (e.g. http://127.0.0.1:9090)")?
+        .trim_end_matches('/');
+    let body = block_on(async {
+        let mut stream = tokio::net::TcpStream::connect(authority)
+            .await
+            .with_context(|| format!("connecting to rbacscope server at {authority}"))?;
+        let req =
+            format!("GET /audit/state HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n");
+        stream.write_all(req.as_bytes()).await?;
+        let mut resp = Vec::new();
+        stream.read_to_end(&mut resp).await?;
+        anyhow::Ok(resp)
+    })??;
+    let split = body
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .context("malformed HTTP response from rbacscope server")?;
+    let head = String::from_utf8_lossy(&body[..split]);
+    let payload = &body[split + 4..];
+    if !head.starts_with("HTTP/1.1 200") {
+        anyhow::bail!(
+            "{}: {}",
+            head.lines().next().unwrap_or_default(),
+            String::from_utf8_lossy(payload).trim()
+        );
+    }
+    let snapshot: rbacscope_core::audit::AuditSnapshot =
+        serde_json::from_slice(payload).context("decoding audit state")?;
+    rbacscope_core::audit::AuditLog::from_snapshot(snapshot).map_err(anyhow::Error::msg)
+}

@@ -16,7 +16,7 @@ path = "src/main.rs"
 default = ["live"]
 # Read RBAC directly from a cluster and run the in-cluster exporter (`serve`).
 # Build with --no-default-features for a smaller, offline-only binary.
-live = ["dep:kube", "dep:k8s-openapi", "dep:tokio"]
+live = ["dep:kube", "dep:k8s-openapi", "dep:tokio", "dep:tokio-rustls"]
 
 [dependencies]
 rbacscope-core.workspace = true
@@ -29,3 +29,4 @@ serde_yaml.workspace = true
 kube = { workspace = true, optional = true }
 k8s-openapi = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
+tokio-rustls = { workspace = true, optional = true }

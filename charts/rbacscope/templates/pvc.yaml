@@ -1,0 +1,17 @@
+{{- if and .Values.auditWebhook.enabled .Values.auditWebhook.persistence.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "rbacscope.fullname" . }}-audit
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rbacscope.labels" . | nindent 4 }}
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- with .Values.auditWebhook.persistence.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.auditWebhook.persistence.size }}
+{{- end }}

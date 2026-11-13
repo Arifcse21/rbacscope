@@ -95,6 +95,22 @@ struct Input {
     no_pods: bool,
 }
 
+/// Where `generate`/`unused` read audit usage from.
+#[derive(Args, Clone, Default)]
+struct AuditSource {
+    /// Audit log file(s), JSON lines (`-` for stdin). Default: the running exporter (--audit-server)
+    #[arg(long = "audit", value_name = "PATH", num_args = 1..)]
+    audit: Vec<PathBuf>,
+    /// Read usage collected by `rbacscope serve` via its audit webhook
+    #[arg(
+        long,
+        value_name = "URL",
+        default_value = "http://127.0.0.1:9090",
+        conflicts_with = "audit"
+    )]
+    audit_server: String,
+}
+
 #[derive(Args, Clone, Default)]
 struct Suppression {
     /// Include built-in system:* bindings and control-plane identities (noisy)
@@ -202,9 +218,8 @@ enum Command {
         /// Subject: user:<name>, group:<name>, sa:<ns>/<name>
         #[arg(long)]
         subject: String,
-        /// Audit log(s), JSON lines (`-` for stdin; zcat rotated .gz files first)
-        #[arg(long = "audit", value_name = "PATH", required = true, num_args = 1..)]
-        audit: Vec<PathBuf>,
+        #[command(flatten)]
+        audit: AuditSource,
         /// Also grant requests that were denied (403) in the log
         #[arg(long)]
         include_denied: bool,
@@ -219,9 +234,8 @@ enum Command {
     Unused {
         #[command(flatten)]
         input: Input,
-        /// Audit log(s), JSON lines (`-` for stdin; zcat rotated .gz files first)
-        #[arg(long = "audit", value_name = "PATH", required = true, num_args = 1..)]
-        audit: Vec<PathBuf>,
+        #[command(flatten)]
+        audit: AuditSource,
         /// Only this subject
         #[arg(long)]
         subject: Option<String>,
@@ -258,6 +272,25 @@ enum Command {
         no_pods: bool,
         #[command(flatten)]
         suppression: Suppression,
+        /// Receive audit events from the API server's webhook backend on this address
+        /// (e.g. 0.0.0.0:9091); enables `generate`/`unused` and the report's usage section
+        #[arg(long, value_name = "ADDR")]
+        audit_listen: Option<std::net::SocketAddr>,
+        /// Environment variable holding the bearer token the API server must send
+        #[arg(long, value_name = "ENV", default_value = "RBACSCOPE_AUDIT_TOKEN")]
+        audit_token_env: String,
+        /// Persist audit usage to this file (e.g. on a PersistentVolume) across restarts
+        #[arg(long, value_name = "PATH")]
+        audit_state: Option<PathBuf>,
+        /// How long to keep audit usage (e.g. 24h, 7d)
+        #[arg(long, default_value = "7d", value_parser = serve::parse_interval)]
+        audit_retention: std::time::Duration,
+        /// PEM certificate for HTTPS on the audit port (the API server only sends its token over TLS)
+        #[arg(long, value_name = "PATH", requires = "audit_tls_key")]
+        audit_tls_cert: Option<PathBuf>,
+        /// PEM private key for --audit-tls-cert
+        #[arg(long, value_name = "PATH", requires = "audit_tls_cert")]
+        audit_tls_key: Option<PathBuf>,
     },
     /// List the built-in detection rules
     Rules {
@@ -338,8 +371,27 @@ fn ignore_rules(s: &Suppression) -> Result<Vec<IgnoreRule>> {
     Ok(out)
 }
 
-fn load_audit(paths: &[PathBuf]) -> Result<AuditLog> {
-    let log = audit::load_audit(paths).context("loading audit log")?;
+#[cfg(feature = "live")]
+fn audit_from_server(url: &str) -> Result<AuditLog> {
+    live::fetch_audit_state(url).with_context(|| {
+        format!("reading audit usage from {url} (run this inside the exporter pod with `kubectl exec`, or pass --audit FILE)")
+    })
+}
+
+#[cfg(not(feature = "live"))]
+fn audit_from_server(_: &str) -> Result<AuditLog> {
+    bail!("this build can only read audit log files; pass --audit FILE")
+}
+
+fn load_audit(src: &AuditSource) -> Result<AuditLog> {
+    if src.audit.is_empty() {
+        let log = audit_from_server(&src.audit_server)?;
+        if log.events == 0 {
+            bail!("the exporter has not received any audit events yet (is the API server audit webhook configured?)");
+        }
+        return Ok(log);
+    }
+    let log = audit::load_audit(&src.audit).context("loading audit log")?;
     if log.skipped_lines > 0 {
         eprintln!(
             "warning: skipped {} line(s) that are not audit events",
@@ -429,7 +481,8 @@ fn run() -> Result<ExitCode> {
                         &a.paths,
                         &report::html::ReportMeta {
                             source: &source,
-                            suppressed: a.suppressed
+                            suppressed: a.suppressed,
+                            usage: None,
                         }
                     )
                 ),
@@ -609,7 +662,29 @@ fn run() -> Result<ExitCode> {
             context,
             no_pods,
             suppression,
+            audit_listen,
+            audit_token_env,
+            audit_state,
+            audit_retention,
+            audit_tls_cert,
+            audit_tls_key,
         } => {
+            let audit = match audit_listen {
+                None => None,
+                Some(listen) => {
+                    let token = std::env::var(&audit_token_env).unwrap_or_default();
+                    if token.trim().len() < 16 {
+                        bail!("--audit-listen needs a bearer token of at least 16 characters in ${audit_token_env}");
+                    }
+                    Some(serve::AuditOptions {
+                        listen,
+                        token: token.trim().to_string(),
+                        state_path: audit_state,
+                        retention: audit_retention,
+                        tls: audit_tls_cert.zip(audit_tls_key),
+                    })
+                }
+            };
             serve::run(serve::ServeOptions {
                 listen,
                 interval,
@@ -619,6 +694,7 @@ fn run() -> Result<ExitCode> {
                 },
                 include_builtin: suppression.include_builtin,
                 ignores: ignore_rules(&suppression)?,
+                audit,
             })?;
         }
         Command::Rules { output } => print!("{}", report::rules(rules::RULES, output.into())),

@@ -27,6 +27,28 @@ scan:
   ignoreRules: []
   extraArgs: []
 
+# Receive audit events from the API server's webhook backend. Powers least-privilege
+# `generate` / `unused` via kubectl exec, the report's "Unused permissions" section
+# and rbacscope_bindings_by_usage metrics. The API server must be pointed at this
+# receiver once (see the chart NOTES / README).
+auditWebhook:
+  enabled: false
+  port: 9091
+  # How long usage is kept (24h, 7d, 30d). Longer windows give safer least-privilege advice.
+  retention: 7d
+  # Secret with key `token` the API server presents as a bearer token.
+  # Empty = the chart generates one and keeps it across upgrades.
+  existingSecret: ""
+  # Peers allowed to reach the receiver (e.g. ipBlock of your control-plane nodes).
+  # Empty = any source; the bearer token is still required.
+  allowFrom: []
+  persistence:
+    # Keep usage across pod rescheduling. Without it an emptyDir keeps it across
+    # container restarts only.
+    enabled: false
+    size: 1Gi
+    storageClass: ""
+
 serviceAccount:
   create: true
   name: ""

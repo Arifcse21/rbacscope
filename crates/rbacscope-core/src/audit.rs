@@ -25,21 +25,21 @@ pub enum AuditError {
 }
 
 /// One distinct kind of request.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Access {
     pub verb: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
-    #[serde(skip_serializing_if = "String::is_empty")]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub api_group: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub resource: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subresource: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub non_resource_url: Option<String>,
 }
 
@@ -77,20 +77,20 @@ impl fmt::Display for Access {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Seen {
     pub allowed: u64,
     pub denied: u64,
 }
 
 impl Seen {
-    fn add(&mut self, other: Seen) {
+    pub fn add(&mut self, other: Seen) {
         self.allowed += other.allowed;
         self.denied += other.denied;
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct AuditLog {
     pub by_subject: BTreeMap<Subject, BTreeMap<Access, Seen>>,
     /// Groups each identity was seen with (`user.groups`).
@@ -310,6 +310,114 @@ impl AuditLog {
         out
     }
 
+    /// Ingest a webhook payload: an `audit.k8s.io` EventList (what the API server's
+    /// webhook backend sends) or a single Event. Returns the number of events counted.
+    pub fn ingest_json(&mut self, body: &[u8]) -> Result<u64, String> {
+        let value: serde_json::Value =
+            serde_json::from_slice(body).map_err(|e| format!("invalid JSON: {e}"))?;
+        let items = match value.get("kind").and_then(|k| k.as_str()) {
+            Some("EventList") => value
+                .get("items")
+                .and_then(|i| i.as_array())
+                .cloned()
+                .unwrap_or_default(),
+            Some("Event") | None => vec![value],
+            Some(other) => return Err(format!("unexpected kind {other}")),
+        };
+        let before = self.events;
+        for item in items {
+            match serde_json::from_value::<RawEvent>(item) {
+                Ok(ev) => self.record(ev),
+                Err(_) => self.skipped_lines += 1,
+            }
+        }
+        Ok(self.events - before)
+    }
+
+    /// Add another log's counts to this one.
+    pub fn merge(&mut self, other: &AuditLog) {
+        for (subject, accesses) in &other.by_subject {
+            let mine = self.by_subject.entry(subject.clone()).or_default();
+            for (a, seen) in accesses {
+                mine.entry(a.clone()).or_default().add(*seen);
+            }
+        }
+        for (subject, groups) in &other.groups {
+            self.groups
+                .entry(subject.clone())
+                .or_default()
+                .extend(groups.iter().cloned());
+        }
+        self.events += other.events;
+        self.skipped_lines += other.skipped_lines;
+        for ts in other.first.iter() {
+            if self.first.as_ref().is_none_or(|f| ts < f) {
+                self.first = Some(ts.clone());
+            }
+        }
+        for ts in other.last.iter() {
+            if self.last.as_ref().is_none_or(|l| ts > l) {
+                self.last = Some(ts.clone());
+            }
+        }
+    }
+
+    pub fn to_snapshot(&self) -> AuditSnapshot {
+        let mut subjects: BTreeSet<&Subject> = self.by_subject.keys().collect();
+        subjects.extend(self.groups.keys());
+        AuditSnapshot {
+            events: self.events,
+            first: self.first.clone(),
+            last: self.last.clone(),
+            subjects: subjects
+                .into_iter()
+                .map(|s| SubjectUsage {
+                    subject: s.to_string(),
+                    groups: self
+                        .groups
+                        .get(s)
+                        .map(|g| g.iter().cloned().collect())
+                        .unwrap_or_default(),
+                    accesses: self
+                        .by_subject
+                        .get(s)
+                        .into_iter()
+                        .flatten()
+                        .map(|(a, seen)| AccessUsage {
+                            access: a.clone(),
+                            allowed: seen.allowed,
+                            denied: seen.denied,
+                        })
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
+
+    pub fn from_snapshot(snap: AuditSnapshot) -> Result<AuditLog, String> {
+        let mut log = AuditLog {
+            events: snap.events,
+            first: snap.first,
+            last: snap.last,
+            ..Default::default()
+        };
+        for su in snap.subjects {
+            let subject: Subject = su.subject.parse()?;
+            if !su.groups.is_empty() {
+                log.groups
+                    .insert(subject.clone(), su.groups.into_iter().collect());
+            }
+            let accesses = log.by_subject.entry(subject).or_default();
+            for au in su.accesses {
+                accesses.entry(au.access).or_default().add(Seen {
+                    allowed: au.allowed,
+                    denied: au.denied,
+                });
+            }
+        }
+        Ok(log)
+    }
+
     /// "first .. last (N requests)" for reports.
     pub fn window(&self) -> String {
         format!(
@@ -319,6 +427,36 @@ impl AuditLog {
             self.events
         )
     }
+}
+
+/// Serializable form of an [`AuditLog`] (persistence and `/audit/state`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditSnapshot {
+    pub events: u64,
+    #[serde(default)]
+    pub first: Option<String>,
+    #[serde(default)]
+    pub last: Option<String>,
+    #[serde(default)]
+    pub subjects: Vec<SubjectUsage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubjectUsage {
+    /// `user:<name>` or `sa:<ns>/<name>`.
+    pub subject: String,
+    #[serde(default)]
+    pub groups: Vec<String>,
+    #[serde(default)]
+    pub accesses: Vec<AccessUsage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessUsage {
+    #[serde(flatten)]
+    pub access: Access,
+    pub allowed: u64,
+    pub denied: u64,
 }
 
 /// Load audit logs from files or `-` (stdin). Decompress rotated `.gz` logs first (`zcat`).
@@ -388,6 +526,36 @@ not json
             .collect();
         assert_eq!(bot, vec!["impersonate groups ops", "impersonate users bob"]);
         assert_eq!(l.accesses_of(&Subject::group("ops")).len(), 1);
+    }
+
+    const EVENT_LIST: &str = r#"{"kind":"EventList","apiVersion":"audit.k8s.io/v1","items":[
+{"kind":"Event","stage":"ResponseComplete","verb":"list","user":{"username":"system:serviceaccount:app:web","groups":["system:serviceaccounts","system:authenticated"]},"objectRef":{"resource":"configmaps","namespace":"app"},"responseStatus":{"code":200},"requestReceivedTimestamp":"2026-11-13T05:00:00Z"},
+{"kind":"Event","stage":"ResponseComplete","verb":"get","user":{"username":"alice","groups":["devs"]},"objectRef":{"resource":"secrets","namespace":"app","name":"db"},"responseStatus":{"code":403},"requestReceivedTimestamp":"2026-11-13T05:01:00Z"},
+{"kind":"Event","stage":"RequestReceived","verb":"get","user":{"username":"alice"},"objectRef":{"resource":"pods"}}]}"#;
+
+    #[test]
+    fn ingests_webhook_event_lists() {
+        let mut l = AuditLog::default();
+        assert_eq!(l.ingest_json(EVENT_LIST.as_bytes()).unwrap(), 2);
+        assert_eq!(l.accesses_of(&Subject::group("devs")).len(), 1);
+        assert!(l.ingest_json(b"{\"kind\":\"Pod\"}").is_err());
+        assert!(l.ingest_json(b"not json").is_err());
+    }
+
+    #[test]
+    fn snapshot_round_trip_and_merge() {
+        let mut a = AuditLog::default();
+        a.ingest_json(EVENT_LIST.as_bytes()).unwrap();
+        let json = serde_json::to_string(&a.to_snapshot()).unwrap();
+        let b = AuditLog::from_snapshot(serde_json::from_str(&json).unwrap()).unwrap();
+        assert_eq!(b.to_snapshot(), a.to_snapshot());
+
+        let mut merged = a.clone();
+        merged.merge(&b);
+        assert_eq!(merged.events, 4);
+        let web = merged.accesses_of(&Subject::service_account("app", "web"));
+        assert_eq!(web.values().next().unwrap().allowed, 2);
+        assert_eq!(merged.first.as_deref(), Some("2026-11-13T05:00:00Z"));
     }
 
     #[test]

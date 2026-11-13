@@ -32,6 +32,10 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end }}
 {{- end }}
 
+{{- define "rbacscope.auditSecretName" -}}
+{{- default (printf "%s-audit-token" (include "rbacscope.fullname" .)) .Values.auditWebhook.existingSecret }}
+{{- end }}
+
 {{- define "rbacscope.image" -}}
 {{- if .Values.image.digest }}
 {{- printf "%s@%s" .Values.image.repository .Values.image.digest }}

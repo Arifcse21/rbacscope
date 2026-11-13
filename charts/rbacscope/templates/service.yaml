@@ -13,3 +13,8 @@ spec:
     - name: http
       port: {{ .Values.service.port }}
       targetPort: http
+    {{- if .Values.auditWebhook.enabled }}
+    - name: audit
+      port: {{ .Values.auditWebhook.port }}
+      targetPort: audit
+    {{- end }}

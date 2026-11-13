@@ -7,6 +7,10 @@ metadata:
     {{- include "rbacscope.labels" . | nindent 4 }}
 spec:
   replicas: 1
+  {{- if and .Values.auditWebhook.enabled .Values.auditWebhook.persistence.enabled }}
+  strategy:
+    type: Recreate   # ReadWriteOnce volume
+  {{- end }}
   selector:
     matchLabels:
       {{- include "rbacscope.selectorLabels" . | nindent 6 }}
@@ -40,6 +44,7 @@ spec:
         runAsNonRoot: true
         runAsUser: 65532
         runAsGroup: 65532
+        fsGroup: 65532
         seccompProfile:
           type: RuntimeDefault
       containers:
@@ -62,12 +67,31 @@ spec:
             {{- if .Values.scan.ignoreRules }}
             - --ignore-file=/etc/rbacscope/rbacscope-ignore.yaml
             {{- end }}
+            {{- if .Values.auditWebhook.enabled }}
+            - --audit-listen=0.0.0.0:{{ .Values.auditWebhook.port }}
+            - --audit-retention={{ .Values.auditWebhook.retention }}
+            - --audit-state=/data/audit-state.json
+            - --audit-tls-cert=/tls/tls.crt
+            - --audit-tls-key=/tls/tls.key
+            {{- end }}
             {{- range .Values.scan.extraArgs }}
             - {{ . | quote }}
             {{- end }}
+          {{- if .Values.auditWebhook.enabled }}
+          env:
+            - name: RBACSCOPE_AUDIT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "rbacscope.auditSecretName" . }}
+                  key: token
+          {{- end }}
           ports:
             - name: http
               containerPort: 9090
+            {{- if .Values.auditWebhook.enabled }}
+            - name: audit
+              containerPort: {{ .Values.auditWebhook.port }}
+            {{- end }}
           readinessProbe:
             httpGet: {path: /readyz, port: http}
             periodSeconds: 10
@@ -81,17 +105,42 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
-          {{- if .Values.scan.ignoreRules }}
+          {{- if or .Values.scan.ignoreRules .Values.auditWebhook.enabled }}
           volumeMounts:
+            {{- if .Values.scan.ignoreRules }}
             - name: ignore
               mountPath: /etc/rbacscope
               readOnly: true
+            {{- end }}
+            {{- if .Values.auditWebhook.enabled }}
+            - name: data
+              mountPath: /data
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+            {{- end }}
           {{- end }}
-      {{- if .Values.scan.ignoreRules }}
+      {{- if or .Values.scan.ignoreRules .Values.auditWebhook.enabled }}
       volumes:
+        {{- if .Values.scan.ignoreRules }}
         - name: ignore
           configMap:
             name: {{ include "rbacscope.fullname" . }}-ignore
+        {{- end }}
+        {{- if .Values.auditWebhook.enabled }}
+        - name: tls
+          secret:
+            secretName: {{ include "rbacscope.fullname" . }}-audit-tls
+            defaultMode: 0440
+        - name: data
+          {{- if .Values.auditWebhook.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "rbacscope.fullname" . }}-audit
+          {{- else }}
+          emptyDir:
+            sizeLimit: 256Mi
+          {{- end }}
+        {{- end }}
       {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

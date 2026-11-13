@@ -1,12 +1,29 @@
 rbacscope scans cluster RBAC every {{ .Values.scan.interval }}.
 
+Report and metrics:
   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "rbacscope.fullname" . }} {{ .Values.service.port }}
-  open http://localhost:{{ .Values.service.port }}/report     # HTML report
-       http://localhost:{{ .Values.service.port }}/metrics    # Prometheus metrics
+  open http://localhost:{{ .Values.service.port }}/report
+
+Run any rbacscope command inside the pod (read-only, uses the pod's ServiceAccount):
+  kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "rbacscope.fullname" . }} -- /rbacscope paths --live
+  kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "rbacscope.fullname" . }} -- /rbacscope who-can get secrets --live
+  kubectl -n {{ .Release.Namespace }} exec -i deploy/{{ include "rbacscope.fullname" . }} -- /rbacscope scan -f - < my-manifests.yaml
+{{- if .Values.auditWebhook.enabled }}
+
+Audit webhook receiver (HTTPS): point the API server at it once. Webhook kubeconfig:
+  server:                     https://$(kubectl -n {{ .Release.Namespace }} get svc {{ include "rbacscope.fullname" . }} -o jsonpath='{.spec.clusterIP}'):{{ .Values.auditWebhook.port }}/audit
+  tls-server-name:            {{ include "rbacscope.fullname" . }}.{{ .Release.Namespace }}.svc
+  certificate-authority-data: $(kubectl -n {{ .Release.Namespace }} get secret {{ include "rbacscope.fullname" . }}-audit-tls -o jsonpath='{.data.ca\.crt}')
+  token:                      $(kubectl -n {{ .Release.Namespace }} get secret {{ include "rbacscope.auditSecretName" . }} -o jsonpath='{.data.token}' | base64 -d)
+API server flags: --audit-policy-file=<policy> --audit-webhook-config-file=<kubeconfig> --audit-webhook-mode=batch
+
+Then, inside the pod:
+  kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "rbacscope.fullname" . }} -- /rbacscope unused --live
+  kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "rbacscope.fullname" . }} -- /rbacscope generate --subject sa:<ns>/<name>
+{{- end }}
 {{- if .Values.networkPolicy.enabled }}
 
-The NetworkPolicy only admits traffic from: {{ .Values.networkPolicy.ingressFrom | toJson }}
-Make sure your Prometheus runs there, or set networkPolicy.ingressFrom.
+The NetworkPolicy admits /metrics and /report traffic only from: {{ .Values.networkPolicy.ingressFrom | toJson }}
 {{- end }}
 {{- if not .Values.scan.baselines }}
 

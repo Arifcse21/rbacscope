@@ -1,23 +1,8 @@
 # rbacscope
 
-**Find risky Kubernetes RBAC, and the multi-step paths to cluster-admin, before an attacker does.** rbacscope is a single static binary. It resolves *effective* permissions (including aggregated ClusterRoles), flags dangerous grants with the exact binding responsible, and finds escalation chains like *exec into a pod → its ServiceAccount can create Deployments in kube-system → run as a cluster-admin SA*. It also reads audit logs and generates least-privilege Roles from what each identity actually uses. It works offline from manifests, a `kubectl` dump and audit logs, reads the live cluster directly, diffs RBAC between Git revisions for pull-request gates, and can run in-cluster as a Prometheus exporter.
+**Find risky Kubernetes RBAC, and the multi-step paths to cluster-admin, before an attacker does.**
 
-```console
-$ rbacscope paths group:developers -f testdata/bad-cluster
-┌──────────────────┬──────┬──────────────────────────────────────────────────────────────────────────────────────┐
-│ SOURCE           ┆ HOPS ┆ PATH                                                                                 │
-╞══════════════════╪══════╪══════════════════════════════════════════════════════════════════════════════════════╡
-│ group:developers ┆ 3    ┆ -> sa:prod/release-bot  [exec-into-pod]                                              │
-│                  ┆      ┆      exec into a pod in prod running as sa:prod/release-bot                          │
-│                  ┆      ┆      via RoleBinding prod/developers-debug -> Role debugger                          │
-│                  ┆      ┆ -> sa:kube-system/ops-admin  [create-workload]                                       │
-│                  ┆      ┆      create deployments in kube-system running as sa:kube-system/ops-admin           │
-│                  ┆      ┆      via RoleBinding kube-system/release-bot-deploy -> ClusterRole workload-deployer │
-│                  ┆      ┆ -> cluster-admin  [wildcard-grant]                                                   │
-│                  ┆      ┆      holds * on * cluster-wide                                                       │
-│                  ┆      ┆      via ClusterRoleBinding ops-admin -> ClusterRole cluster-admin                   │
-└──────────────────┴──────┴──────────────────────────────────────────────────────────────────────────────────────┘
-```
+rbacscope runs as a small pod in your cluster. It continuously resolves *effective* permissions (including aggregated ClusterRoles), flags dangerous grants with the exact binding responsible, finds escalation chains like *exec into a pod → its ServiceAccount can create Deployments in kube-system → run as a cluster-admin ServiceAccount*, and, fed by the API server's audit webhook, tells you which permissions are never used and generates least-privilege Roles from real behaviour. It exposes Prometheus metrics and an HTML report, and every command can be run inside the pod with `kubectl exec`.
 
 ```mermaid
 flowchart LR
@@ -32,134 +17,179 @@ flowchart LR
   class n3 target
 ```
 
-## Usage
+## Install
 
 ```sh
-rbacscope scan --live                             # current kubeconfig context, read-only `list` calls
-rbacscope scan --live --context prod -o html > rbac-report.html
-rbacscope dump > dump.yaml                        # save cluster RBAC for offline use or later `diff`
-# (equivalent without rbacscope access to the cluster:)
-kubectl get roles,rolebindings,clusterroles,clusterrolebindings,serviceaccounts,pods -A -o yaml > dump.yaml
-
-rbacscope scan -f dump.yaml                       # all findings, including escalation paths (RBAC017)
-rbacscope scan -f dump.yaml --baseline k3s        # hide RBAC that ships with k3s
-rbacscope scan -f deploy/ --fail-on high          # CI gate on manifests in a repo
-rbacscope scan -f deploy/ -o sarif > rbac.sarif   # GitHub code scanning, with file:line locations
-
-rbacscope paths -f dump.yaml                      # every subject that can reach cluster-admin in 2+ hops
-rbacscope paths sa:ci/deployer -f dump.yaml       # shortest path from one subject
-rbacscope paths -f dump.yaml -o dot | dot -Tsvg > paths.svg
-rbacscope paths -f dump.yaml -o mermaid           # paste into a GitHub issue/PR
-
-rbacscope who-can get secrets -n prod -f dump.yaml
-rbacscope who-can create pods/exec -f dump.yaml
-rbacscope perms sa:ci/deployer -f dump.yaml       # includes implicit system:serviceaccounts groups
-rbacscope perms user:alice --group developers -f dump.yaml
-rbacscope rules
+helm install rbacscope oci://ghcr.io/arifcse21/charts/rbacscope \
+  --namespace rbacscope --create-namespace
 ```
 
-## Pull-request gate and drift detection
-
-`diff` compares two RBAC states and reports new, worsened and resolved findings, **new escalation paths to cluster-admin**, and added/removed grants. Moving a binding to another file is not a change.
+Common options:
 
 ```sh
-rbacscope diff --before main-manifests/ --after deploy/ --fail-on-new high          # exit 1 on new high/critical risk
-rbacscope diff --before main-manifests/ --after deploy/ -o markdown > rbac-diff.md   # PR comment
-rbacscope diff --before deploy/ --live                                               # Git vs. cluster drift
+# k3s baseline, audit-based least privilege (see below), Prometheus Operator scraping and alerts
+helm install rbacscope oci://ghcr.io/arifcse21/charts/rbacscope -n rbacscope --create-namespace \
+  --set 'scan.baselines={k3s}' \
+  --set auditWebhook.enabled=true \
+  --set serviceMonitor.enabled=true \
+  --set prometheusRule.enabled=true
+```
+
+| Value | Default | Purpose |
+|---|---|---|
+| `scan.interval` | `5m` | How often the cluster is rescanned |
+| `scan.baselines` | `[]` | Distribution RBAC to hide (`k3s`) |
+| `scan.ignoreRules` | `[]` | Accepted findings (see [Suppressing findings](#suppressing-findings)) |
+| `scan.includePods` | `true` | List pods so exec/kubelet paths only target ServiceAccounts that actually run |
+| `auditWebhook.enabled` | `false` | Receive API server audit events (unused permissions, `generate`) |
+| `auditWebhook.retention` | `7d` | How much usage history to keep |
+| `auditWebhook.persistence.enabled` | `false` | Keep usage on a PersistentVolume across rescheduling |
+| `networkPolicy.ingressFrom` | `monitoring` namespace | Who may reach `/metrics` and `/report` |
+| `serviceMonitor.enabled`, `prometheusRule.enabled` | `false` | Prometheus Operator integration |
+| `image.digest` | `""` | Pin the image by digest |
+
+All values: [charts/rbacscope/values.yaml](charts/rbacscope/values.yaml). The pod needs only `list` on Roles, bindings, ServiceAccounts and Pods (never Secrets), runs as non-root with a read-only filesystem, and its own chart scans clean.
+
+## Use it
+
+Open the report:
+
+```sh
+kubectl -n rbacscope port-forward svc/rbacscope 9090
+# http://localhost:9090/report   findings, escalation paths, unused permissions
+# http://localhost:9090/metrics  Prometheus metrics
+```
+
+Run any command inside the pod. It uses the pod's own read-only ServiceAccount, so nothing is installed anywhere else:
+
+```sh
+kubectl -n rbacscope exec deploy/rbacscope -- /rbacscope scan --live
+kubectl -n rbacscope exec deploy/rbacscope -- /rbacscope paths --live                 # who can reach cluster-admin, and how
+kubectl -n rbacscope exec deploy/rbacscope -- /rbacscope paths sa:ci/deployer --live  # shortest path from one subject
+kubectl -n rbacscope exec deploy/rbacscope -- /rbacscope who-can get secrets -n prod --live
+kubectl -n rbacscope exec deploy/rbacscope -- /rbacscope who-can create pods/exec --live
+kubectl -n rbacscope exec deploy/rbacscope -- /rbacscope perms sa:ci/deployer --live
+kubectl -n rbacscope exec deploy/rbacscope -- /rbacscope perms user:alice --group developers --live
+kubectl -n rbacscope exec deploy/rbacscope -- /rbacscope rules
+```
+
+Optional shorthand:
+
+```sh
+alias rbacscope='kubectl -n rbacscope exec -i deploy/rbacscope -- /rbacscope'
+rbacscope paths --live -o mermaid      # paste into a GitHub issue or PR
+```
+
+Check manifests before they reach the cluster by piping them in (`-f -` reads stdin):
+
+```sh
+kubectl -n rbacscope exec -i deploy/rbacscope -- /rbacscope scan -f - < deploy/rbac.yaml
+helm template my-app ./chart | kubectl -n rbacscope exec -i deploy/rbacscope -- /rbacscope scan -f - --fail-on high
+```
+
+Other outputs: `-o json`, `-o sarif`, `-o html` (`scan`); `-o dot`, `-o mermaid` (`paths`).
+
+## Least privilege from audit events
+
+With `auditWebhook.enabled=true`, the API server streams audit events to the pod over HTTPS (separate port, bearer token, private CA generated by the chart). rbacscope keeps a rolling usage window and adds:
+
+- an **Unused permissions** section in `/report`: bindings nobody used, and permissions inside bindings that were never exercised
+- `rbacscope_bindings_by_usage{status="unused|partial|used"}` metrics
+- `unused` and `generate` inside the pod
+
+```sh
+kubectl -n rbacscope exec deploy/rbacscope -- /rbacscope unused --live
+kubectl -n rbacscope exec deploy/rbacscope -- /rbacscope unused --live --subject sa:ci/deployer
+kubectl -n rbacscope exec deploy/rbacscope -- /rbacscope generate --subject sa:ci/deployer > ci-deployer-rbac.yaml
+kubectl -n rbacscope exec deploy/rbacscope -- /rbacscope generate --subject sa:monitoring/agent --resource-names
+```
+
+`generate` writes a Role + RoleBinding per namespace the subject touched (and a ClusterRole for cluster-scoped use) containing only what it actually did. Review it, then `kubectl apply` it and remove the broad binding.
+
+**Connect the API server once.** It needs an audit policy and a webhook kubeconfig pointing at the receiver:
+
+```sh
+kubectl -n rbacscope get svc rbacscope -o jsonpath='{.spec.clusterIP}'                        # receiver IP (port 9091)
+kubectl -n rbacscope get secret rbacscope-audit-tls -o jsonpath='{.data.ca\.crt}'               # CA (already base64)
+kubectl -n rbacscope get secret rbacscope-audit-token -o jsonpath='{.data.token}' | base64 -d  # bearer token
 ```
 
 ```yaml
-# .github/workflows/rbac-diff.yml (excerpt)
-- uses: actions/checkout@v4
-  with: { fetch-depth: 0 }
-- run: git worktree add /tmp/base "origin/${{ github.base_ref }}"
-- run: rbacscope diff --before /tmp/base/deploy --after deploy --fail-on-new high -o markdown | tee rbac-diff.md
+# webhook kubeconfig on the control-plane node
+apiVersion: v1
+kind: Config
+clusters:
+  - name: rbacscope
+    cluster:
+      server: "https://<cluster-ip>:9091/audit"
+      tls-server-name: rbacscope.rbacscope.svc     # the certificate's name; the IP is not in it
+      certificate-authority-data: "<ca>"
+users:
+  - name: kube-apiserver
+    user: { token: "<token>" }
+contexts:
+  - name: rbacscope
+    context: { cluster: rbacscope, user: kube-apiserver }
+current-context: rbacscope
 ```
 
-Example: a PR that adds a harmless-looking cluster-admin ServiceAccount to a namespace where a debug account can mint tokens:
+HTTPS is required, not optional: Kubernetes clients, including the API server's webhook, silently drop the bearer token on `http://` URLs.
 
-```text
-NEW ESCALATION PATHS TO CLUSTER-ADMIN
-  + sa:rbacscopetest/debug-helper -> [mint-token] sa:rbacscopetest/ops-admin -> [wildcard-grant] cluster-admin
-  + sa:rbacscopetest/default -> [create-workload] sa:rbacscopetest/ops-admin -> [wildcard-grant] cluster-admin
+API server flags: `--audit-policy-file=<policy>` ([metadata-only example](examples/k3s-test/audit-policy.yaml); never logs request bodies), `--audit-webhook-config-file=<kubeconfig>`, `--audit-webhook-mode=batch`.
+**k3s:** `sudo bash examples/k3s-test/enable-audit-webhook.sh` does all of this (`--undo` reverts).
+Managed control planes (EKS, GKE, AKS) do not accept custom audit webhooks; there, export audit logs from the provider and run `generate`/`unused` with `--audit -` piped into the pod.
+
+Usage is only as complete as the window. Cover a full business cycle (deploys, cron jobs, month-end) before removing access.
+
+## Pull-request gate and drift
+
+Fail a pull request that introduces new RBAC risk, with a Markdown summary for the PR:
+
+```yaml
+# .github/workflows/rbac.yml
+on: pull_request
+jobs:
+  rbac:
+    runs-on: ubuntu-latest
+    permissions: { contents: read, security-events: write }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Arifcse21/rbacscope@v0.6.0
+        id: rbacscope
+        with:
+          path: deploy/
+          fail-on: high
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: ${{ steps.rbacscope.outputs.sarif-file }}
+          category: rbacscope
 ```
 
-## In-cluster exporter
+Findings appear in the Security tab and inline on the offending binding.
 
-`rbacscope serve` rescans the cluster on an interval and serves `/metrics` (Prometheus), `/report` (HTML), `/healthz` and `/readyz`.
+Drift between Git and the cluster, from the pod:
 
 ```sh
-helm install rbacscope oci://ghcr.io/arifcse21/charts/rbacscope -n rbacscope --create-namespace \
-  --set 'scan.baselines={k3s}' --set serviceMonitor.enabled=true --set prometheusRule.enabled=true
-kubectl -n rbacscope port-forward svc/rbacscope 9090   # then open http://localhost:9090/report
-# without Helm: kubectl apply -f deploy/kubernetes/rbacscope.yaml
+kubectl -n rbacscope exec -i deploy/rbacscope -- /rbacscope diff --before - --live < deploy/rbac.yaml
+kubectl -n rbacscope exec deploy/rbacscope -- /rbacscope dump > snapshot.yaml                         # save today's RBAC
+kubectl -n rbacscope exec -i deploy/rbacscope -- /rbacscope diff --before - --live --fail-on-new high < snapshot.yaml
 ```
 
-Chart values: `scan.interval`, `scan.baselines`, `scan.ignoreRules` (same schema as `.rbacscope-ignore.yaml`), `scan.includePods`, `networkPolicy.ingressFrom`, `serviceMonitor.*`, `prometheusRule.*` (alerts for escalation paths, critical findings and stale scans), `image.digest` and the usual scheduling/resources options. See [charts/rbacscope/values.yaml](charts/rbacscope/values.yaml).
+`diff` reports new, worsened and resolved findings, **new escalation paths to cluster-admin**, and added/removed grants (`-o markdown` for PR comments).
+
+## Monitoring
 
 | Metric | Meaning |
 |---|---|
-| `rbacscope_findings{rule,severity}` | current findings (every rule is exported, 0 when clean) |
-| `rbacscope_escalation_paths` | subjects with a multi-step path to cluster-admin |
-| `rbacscope_suppressed_findings`, `rbacscope_grants` | ignored findings; effective grants |
-| `rbacscope_scans_total{result}`, `rbacscope_last_success_timestamp_seconds`, `rbacscope_scan_duration_seconds` | exporter health |
+| `rbacscope_findings{rule,severity}` | Current findings (every rule exported, 0 when clean) |
+| `rbacscope_escalation_paths` | Subjects with a multi-step path to cluster-admin |
+| `rbacscope_bindings_by_usage{status}` | Bindings by audit usage (with `auditWebhook`) |
+| `rbacscope_audit_window_requests`, `rbacscope_audit_events_received_total`, `rbacscope_audit_requests_rejected_total` | Audit receiver health |
+| `rbacscope_suppressed_findings`, `rbacscope_grants` | Ignored findings; effective grants |
+| `rbacscope_scans_total{result}`, `rbacscope_last_success_timestamp_seconds`, `rbacscope_scan_duration_seconds` | Exporter health |
 
-```yaml
-# Prometheus alert
-- alert: RBACEscalationPath
-  expr: rbacscope_escalation_paths > 0
-  for: 15m
-  annotations: { summary: "A subject can escalate to cluster-admin; see /report" }
-```
-
-The exporter needs only `list` on RBAC objects, ServiceAccounts and Pods (no Secrets), runs as non-root with a read-only filesystem, and keeps only each pod's namespace, ServiceAccount and phase. rbacscope's own manifest scans clean. On k3s without a registry, load the local image with `docker save rbacscope:dev | sudo k3s ctr images import -` and set `image: rbacscope:dev`.
-
-## Least privilege from audit logs
-
-Point rbacscope at a Kubernetes audit log (JSON lines, `audit.k8s.io/v1`, `Metadata` level is enough):
-
-```sh
-# Minimal Role/RoleBinding per namespace (+ ClusterRole for cluster-scoped use) from observed requests
-rbacscope generate --subject sa:ci/deployer --audit audit.log > ci-deployer-rbac.yaml
-rbacscope generate --subject sa:monitoring/agent --audit audit.log --resource-names   # pin get/patch/... to object names
-rbacscope generate --subject group:developers --audit audit.log                     # all users seen in the group
-
-# Granted vs. used: bindings nobody used, and permissions inside bindings that were never exercised
-rbacscope unused -f dump.yaml --audit audit.log
-rbacscope unused -f dump.yaml --audit audit.log --subject sa:ci/deployer -o json
-```
-
-```text
-STATUS   SUBJECT              GRANTED VIA                                            REQUESTS  USED                NEVER USED
-UNUSED   sa:ci/deployer       RoleBinding kube-system/ci-token-minter -> Role ...    0                             create serviceaccounts/token
-PARTIAL  sa:monitoring/agent  ClusterRoleBinding monitoring -> ClusterRole ...       24        list pods, watch …  get secrets, list secrets
-USED     user:support-bot     ClusterRoleBinding support-impersonate -> ...          2         impersonate users
-```
-
-Notes:
-- Denied (403) requests are left out unless `--include-denied`; requests made while impersonating count for the impersonated identity, and as `impersonate` for the caller.
-- Usage is only as complete as the audit window and policy. Look at a full business cycle (deploys, cron jobs, month-end) before removing access.
-- `zcat` rotated `.gz` logs into `--audit -`. On k3s, [examples/k3s-test/enable-audit.sh](examples/k3s-test/enable-audit.sh) turns audit logging on with a metadata-only policy.
-
-Every command that takes `-f` also accepts `--live` (with optional `--context`). `-f -` reads stdin. Built-in `system:*` bindings and control-plane identities are hidden by default; `--include-builtin` shows them.
-
-## Escalation techniques
-
-`paths` and RBAC017 build a graph where an edge means "A can obtain B's privileges":
-
-| Technique | Edge exists when A can… |
-|---|---|
-| `wildcard-grant` | already holds `*` on `*` (cluster or namespace) |
-| `bind-role` | `bind` the cluster-admin ClusterRole and create (Cluster)RoleBindings |
-| `escalate-role` | `escalate` + update (Cluster)Roles |
-| `impersonate` | impersonate the user, group or ServiceAccount |
-| `mint-token` | create `serviceaccounts/token` for B |
-| `steal-token-secret` | read Secrets in B's namespace *and* B has a legacy token Secret |
-| `create-workload` | create pods/Deployments/Jobs/… in B's namespace (and run as B) |
-| `exec-into-pod` | `pods/exec` in a namespace where a running pod uses B |
-| `kubelet-proxy` | `nodes/proxy` (kubelet API) while a running pod uses B |
-
-Only identities that hold permissions are graph targets. Without pods in the input, exec/kubelet edges are marked *assumed*.
+`prometheusRule.enabled=true` installs alerts for escalation paths, critical findings and stale scans.
 
 ## What it detects
 
@@ -177,82 +207,56 @@ Only identities that hold permissions are graph targets. Without pods in the inp
 | RBAC010 | high | Manage admission webhooks |
 | RBAC011 | high/critical | Wildcard verbs/resources |
 | RBAC012 | critical | Bound to `cluster-admin` |
-| RBAC013 | critical/high | Grants to anonymous / all-authenticated / all-SA groups |
+| RBAC013 | critical/high | Grants to anonymous / all-authenticated / all-ServiceAccount groups |
 | RBAC014 | medium | Permissions on the `default` ServiceAccount |
 | RBAC015 | low | Binding references a missing role (latent escalation) |
 | RBAC016 | medium | Create PersistentVolumes (hostPath) |
 | RBAC017 | critical | Multi-step escalation path to cluster-admin |
 
-## Suppressing accepted findings
+Escalation-path techniques (an edge means "A can obtain B's privileges"):
 
-Put a `.rbacscope-ignore.yaml` in the working directory (or pass `--ignore-file`). Each entry must narrow by at least one of `rule`, `subject`, `binding` (globs with `*`):
+| Technique | Edge exists when A can… |
+|---|---|
+| `wildcard-grant` | already holds `*` on `*` (cluster or namespace) |
+| `bind-role` | `bind` cluster-admin and create (Cluster)RoleBindings |
+| `escalate-role` | `escalate` + update (Cluster)Roles |
+| `impersonate` | impersonate the user, group or ServiceAccount |
+| `mint-token` | create `serviceaccounts/token` for B |
+| `steal-token-secret` | read Secrets in B's namespace while B has a legacy token Secret |
+| `create-workload` | create pods/Deployments/Jobs/… in B's namespace (and run as B) |
+| `exec-into-pod` | `pods/exec` where a running pod uses B |
+| `kubelet-proxy` | `nodes/proxy` while a running pod uses B |
+
+## Suppressing findings
+
+Accepted findings go in the chart values (each entry needs at least one of `rule`, `subject`, `binding`; `*` globs):
 
 ```yaml
-ignore:
-  - rule: RBAC004
-    subject: "sa:monitoring/prometheus"
-    reason: reads TLS secrets for blackbox probes (SEC-123)
-  - subject: "sa:argocd/*"
-    binding: "argocd-*"
-    reason: Argo CD manages the cluster
+scan:
+  baselines: [k3s]
+  ignoreRules:
+    - rule: RBAC004
+      subject: "sa:monitoring/prometheus"
+      reason: reads TLS secrets for blackbox probes (SEC-123)
+    - subject: "sa:argocd/*"
+      binding: "argocd-*"
+      reason: Argo CD manages the cluster
 ```
 
-`--baseline k3s` suppresses the RBAC that k3s installs (helm-controller, Traefik, local-path-provisioner, cloud controller). Use `--show-suppressed` to audit what is hidden. See [examples/rbacscope-ignore.yaml](examples/rbacscope-ignore.yaml).
+## Security
 
-## GitHub Action
-
-```yaml
-jobs:
-  rbac:
-    runs-on: ubuntu-latest
-    permissions: { contents: read, security-events: write }
-    steps:
-      - uses: actions/checkout@v4
-      - uses: Arifcse21/rbacscope@v0.2.0
-        id: rbacscope
-        with:
-          path: deploy/            # space-separated files/dirs
-          fail-on: high            # empty = never fail
-      - uses: github/codeql-action/upload-sarif@v3
-        if: always()
-        with:
-          sarif_file: ${{ steps.rbacscope.outputs.sarif-file }}
-          category: rbacscope
-```
-
-Findings appear in the Security tab and inline on the offending binding in pull requests.
-
-## Install
-
-Release binaries, the image and the chart are signed; see [SECURITY.md](SECURITY.md) for `cosign` / `gh attestation verify` commands.
-
-```sh
-cargo install --path rbacscope-cli                          # Rust 1.95+
-cargo install --path rbacscope-cli --no-default-features    # offline-only, no kube-rs (smaller)
-# or
-docker build -t rbacscope . && docker run --rm -i rbacscope scan -f - < dump.yaml
-```
+The report and metrics describe your cluster's weak spots: keep the Service ClusterIP-only and the NetworkPolicy in place. Release binaries, the image and the chart are signed with Sigstore and carry SLSA provenance; see [SECURITY.md](SECURITY.md) for verification and vulnerability reporting.
 
 ## Roadmap
 
-- [x] **v0.1**: YAML/JSON loader, effective-permission resolution with aggregation, 16 rules, `scan` / `who-can` / `perms`, table and JSON output
-- [x] **v0.2**: escalation-path graph (`paths`, RBAC017), DOT/Mermaid export, SARIF with file:line locations, GitHub Action, ignore files and `k3s` baseline
-- [x] **v0.3**: least privilege: audit-log parser, `generate` minimal Roles, `unused` granted-vs-used report
-- [x] **v0.4**: `diff` (PR gate, drift), HTML report, `--live` cluster access via kube-rs, `dump`, in-cluster exporter (`serve`) with Prometheus metrics
-- [x] **v0.5**: Helm chart (ServiceMonitor, PrometheusRule, NetworkPolicy), tag-triggered release with static binaries for 5 platforms, multi-arch image, SBOM, cosign keyless signatures and SLSA provenance ([SECURITY.md](SECURITY.md))
-- [ ] **v0.6**: admission-aware findings (Pod Security Admission, ValidatingAdmissionPolicy/CEL rules that block a technique), operator mode with a `RBACReport` CRD
-- [ ] Baselines for EKS, GKE, AKS, OpenShift (contributions welcome: they need a real cluster dump)
+- [x] **v0.1–v0.3**: rules, effective permissions, escalation paths, SARIF, audit-log least privilege
+- [x] **v0.4–v0.5**: live cluster access, `diff`, HTML report, in-cluster exporter, Helm chart, signed releases
+- [x] **v0.6**: pod-first: API server audit webhook receiver, unused-permission report and metrics, `generate`/`unused` via `kubectl exec`
+- [ ] **v0.7**: admission-aware findings (Pod Security Admission, ValidatingAdmissionPolicy), `RBACReport` CRD
 
-## Development
+## Contributing
 
-```sh
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
-cargo run -- scan -f testdata/bad-cluster      # intentionally vulnerable demo cluster
-cargo run -- paths -f testdata/bad-cluster
-```
-
-Layout: `crates/rbacscope-core` (model, loader, resolution, graph, rules, suppression, audit, generate, unused), `crates/rbacscope-report` (table/JSON/SARIF/DOT/Mermaid/Markdown/HTML), `rbacscope-cli` (binary; `live.rs` and `serve.rs` behind the default `live` feature). See [CONTRIBUTING.md](CONTRIBUTING.md) to add a rule. To test against a local cluster, see [examples/k3s-test](examples/k3s-test).
+See [CONTRIBUTING.md](CONTRIBUTING.md) for building, testing and adding detection rules.
 
 ## License
 

@@ -1,0 +1,53 @@
+name: rbacscope
+description: Scan Kubernetes RBAC manifests for risky permissions and escalation paths to cluster-admin
+branding:
+  icon: shield
+  color: red
+
+inputs:
+  path:
+    description: Files or directories with Kubernetes manifests (space-separated)
+    required: true
+  fail-on:
+    description: Fail the step if any finding is at or above this severity (info|low|medium|high|critical); empty to never fail
+    required: false
+    default: high
+  sarif-file:
+    description: Where to write SARIF results (upload with github/codeql-action/upload-sarif)
+    required: false
+    default: rbacscope.sarif
+  baseline:
+    description: Optional distribution baseline to suppress (e.g. k3s)
+    required: false
+    default: ""
+
+outputs:
+  sarif-file:
+    description: Path of the SARIF report
+    value: ${{ inputs.sarif-file }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install rbacscope
+      shell: bash
+      run: cargo install --locked --quiet --path "$GITHUB_ACTION_PATH/rbacscope-cli" --root "$RUNNER_TEMP/rbacscope"
+
+    - name: Scan
+      shell: bash
+      env:
+        RBACSCOPE_PATH: ${{ inputs.path }}
+        RBACSCOPE_FAIL_ON: ${{ inputs.fail-on }}
+        RBACSCOPE_SARIF: ${{ inputs.sarif-file }}
+        RBACSCOPE_BASELINE: ${{ inputs.baseline }}
+      run: |
+        bin="$RUNNER_TEMP/rbacscope/bin/rbacscope"
+        read -r -a paths <<< "$RBACSCOPE_PATH"
+        extra=()
+        [ -n "$RBACSCOPE_BASELINE" ] && extra+=(--baseline "$RBACSCOPE_BASELINE")
+
+        "$bin" scan -f "${paths[@]}" "${extra[@]}" -o sarif > "$RBACSCOPE_SARIF"
+
+        fail=()
+        [ -n "$RBACSCOPE_FAIL_ON" ] && fail+=(--fail-on "$RBACSCOPE_FAIL_ON")
+        NO_COLOR=1 "$bin" scan -f "${paths[@]}" "${extra[@]}" "${fail[@]}"

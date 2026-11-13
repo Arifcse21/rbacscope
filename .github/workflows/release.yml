@@ -1,0 +1,211 @@
+# Tag-triggered release: `git tag v0.5.0 && git push origin v0.5.0`
+#
+# Produces, all signed keylessly with Sigstore (GitHub OIDC identity, no long-lived keys):
+#   - static binaries for Linux (x86_64/aarch64 musl), macOS (x86_64/arm64), Windows (x86_64)
+#   - SHA256SUMS + Sigstore bundle, SPDX SBOM, SLSA build provenance attestations
+#   - multi-arch image ghcr.io/<owner>/rbacscope:<version> (cosign-signed, SBOM + provenance)
+#   - Helm chart oci://ghcr.io/<owner>/charts/rbacscope (cosign-signed)
+# Verification steps: SECURITY.md.
+name: release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag must match Cargo and chart versions
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          cargo_version="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          chart_version="$(grep -m1 '^version:' charts/rbacscope/Chart.yaml | awk '{print $2}')"
+          app_version="$(grep -m1 '^appVersion:' charts/rbacscope/Chart.yaml | awk '{print $2}' | tr -d '"')"
+          echo "tag=$tag cargo=$cargo_version chart=$chart_version app=$app_version"
+          [ "$tag" = "$cargo_version" ] && [ "$tag" = "$chart_version" ] && [ "$tag" = "$app_version" ]
+
+  binaries:
+    needs: preflight
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-24.04 }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm }
+          - { target: x86_64-apple-darwin, os: macos-latest }
+          - { target: aarch64-apple-darwin, os: macos-latest }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build
+        run: cargo build --release --locked -p rbacscope --target ${{ matrix.target }}
+      - name: Package
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          name="rbacscope-${GITHUB_REF_NAME}-${TARGET}"
+          mkdir -p "pkg/$name" out
+          cp LICENSE README.md "pkg/$name/"
+          if [[ "$TARGET" == *windows* ]]; then
+            cp "target/$TARGET/release/rbacscope.exe" "pkg/$name/"
+            (cd pkg && 7z a "../out/$name.zip" "$name" >/dev/null)
+          else
+            cp "target/$TARGET/release/rbacscope" "pkg/$name/"
+            tar -C pkg -czf "out/$name.tar.gz" "$name"
+          fi
+          # Raw Linux binaries for the container image.
+          case "$TARGET" in
+            x86_64-unknown-linux-musl)  mkdir -p out/linux/amd64 && cp "target/$TARGET/release/rbacscope" out/linux/amd64/ ;;
+            aarch64-unknown-linux-musl) mkdir -p out/linux/arm64 && cp "target/$TARGET/release/rbacscope" out/linux/arm64/ ;;
+          esac
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.target }}
+          path: out/
+          if-no-files-found: error
+
+  image:
+    needs: binaries
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write      # Sigstore keyless signing
+      attestations: write  # SLSA provenance
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bin-*-linux-musl
+          path: dist
+          merge-multiple: true
+      - name: Image name (ghcr requires lowercase)
+        run: |
+          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+          chmod +x dist/linux/*/rbacscope
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.release
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          sbom: true
+          provenance: mode=max
+      - uses: sigstore/cosign-installer@v3
+      - name: Sign image
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+  chart:
+    needs: image
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - uses: sigstore/cosign-installer@v3
+      - name: Package, push and sign chart
+        env:
+          GH_ACTOR: ${{ github.actor }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_DIGEST: ${{ needs.image.outputs.digest }}
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          version="${GITHUB_REF_NAME#v}"
+          # Pin the chart to this release's image by digest. The repo substitutions are no-ops
+          # upstream and retarget the chart to the fork's own image when a fork cuts a release.
+          sed -i "s|ghcr.io/arifcse21/rbacscope|ghcr.io/${GITHUB_REPOSITORY,,}|; s|^  digest: \"\"|  digest: \"${IMAGE_DIGEST}\"|" charts/rbacscope/values.yaml
+          sed -i "s|github.com/Arifcse21/rbacscope|github.com/${GITHUB_REPOSITORY}|g" charts/rbacscope/Chart.yaml
+          grep -q "digest: \"${IMAGE_DIGEST}\"" charts/rbacscope/values.yaml
+          helm lint --strict charts/rbacscope
+          helm package charts/rbacscope --destination out
+          echo "$GH_TOKEN" | helm registry login ghcr.io -u "$GH_ACTOR" --password-stdin
+          helm push "out/rbacscope-${version}.tgz" "oci://ghcr.io/${owner}/charts" 2>&1 | tee push.log
+          digest="$(grep -o 'sha256:[0-9a-f]*' push.log | head -1)"
+          cosign sign --yes "ghcr.io/${owner}/charts/rbacscope@${digest}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chart
+          path: out/*.tgz
+
+  release:
+    needs: [binaries, image, chart]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Collect release files
+        run: |
+          mkdir dist
+          cp artifacts/*.tar.gz artifacts/*.zip artifacts/*.tgz dist/
+      - uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: spdx-json
+          output-file: dist/rbacscope-${{ github.ref_name }}.spdx.json
+          upload-artifact: false
+      - name: Checksums
+        run: cd dist && sha256sum -- * > SHA256SUMS && cat SHA256SUMS
+      - uses: sigstore/cosign-installer@v3
+      - name: Sign checksums
+        run: cosign sign-blob --yes --bundle dist/SHA256SUMS.sigstore.json dist/SHA256SUMS
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.tgz
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes --title "rbacscope $GITHUB_REF_NAME"

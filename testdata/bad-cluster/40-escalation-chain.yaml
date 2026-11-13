@@ -1,0 +1,40 @@
+# A 3-hop escalation no single rule shows on its own:
+#   group:developers  --exec into pod in prod-->  sa:prod/release-bot
+#   sa:prod/release-bot  --create deployments in kube-system-->  sa:kube-system/ops-admin
+#   sa:kube-system/ops-admin  --bound to cluster-admin-->  cluster-admin
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: release-bot, namespace: prod}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: release-bot-7d9f, namespace: prod}
+spec:
+  serviceAccountName: release-bot
+  containers: [{name: bot, image: busybox:1.36}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: workload-deployer}
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: release-bot-deploy, namespace: kube-system}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: workload-deployer}
+subjects:
+  - {kind: ServiceAccount, name: release-bot, namespace: prod}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: ops-admin, namespace: kube-system}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: ops-admin}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: cluster-admin}
+subjects:
+  - {kind: ServiceAccount, name: ops-admin, namespace: kube-system}

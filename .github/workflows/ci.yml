@@ -1,0 +1,72 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+      - name: Demo scan must flag the vulnerable fixture
+        run: |
+          if cargo run -q -- scan -f testdata/bad-cluster --fail-on critical; then
+            echo "expected critical findings"; exit 1
+          fi
+          cargo run -q -- scan -f testdata/good-cluster --fail-on low
+          cargo run -q -- paths group:developers -f testdata/bad-cluster -o json | grep -q '"hops": 3'
+          cargo run -q -- generate --subject sa:ci/deployer --audit testdata/audit/bad-cluster.audit.log > /tmp/gen.yaml
+          cargo run -q -- scan -f /tmp/gen.yaml --fail-on high
+          cargo run -q -- unused -f testdata/bad-cluster --audit testdata/audit/bad-cluster.audit.log -o json | grep -q '"UNUSED"'
+          if cargo run -q -- diff --before testdata/good-cluster --after testdata/good-cluster testdata/bad-cluster --fail-on-new critical > /dev/null; then
+            echo "diff must fail on new critical risk"; exit 1
+          fi
+          cargo run -q -- diff --before testdata/bad-cluster --after testdata/bad-cluster --fail-on-new low
+          cargo run -q -- scan -f deploy/kubernetes/rbacscope.yaml --fail-on low
+      - name: Offline-only build (no kube-rs)
+        run: cargo clippy -p rbacscope --no-default-features --all-targets --locked -- -D warnings
+
+  chart:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Lint and render
+        run: |
+          helm lint --strict charts/rbacscope
+          helm template ci charts/rbacscope > /tmp/chart.yaml
+          helm template ci charts/rbacscope --set serviceMonitor.enabled=true --set prometheusRule.enabled=true \
+            --set 'scan.ignoreRules[0].rule=RBAC004' --set scan.includePods=false > /tmp/chart-all.yaml
+      - name: Chart's own RBAC must scan clean
+        run: cargo run -q -- scan -f /tmp/chart.yaml /tmp/chart-all.yaml --fail-on low
+
+  action:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./
+        id: rbacscope
+        with:
+          path: testdata/bad-cluster
+          fail-on: ""
+      - uses: github/codeql-action/upload-sarif@v3
+        if: github.event_name == 'push'
+        with:
+          sarif_file: ${{ steps.rbacscope.outputs.sarif-file }}
+          category: rbacscope

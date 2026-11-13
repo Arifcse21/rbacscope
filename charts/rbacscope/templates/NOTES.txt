@@ -1,0 +1,14 @@
+rbacscope scans cluster RBAC every {{ .Values.scan.interval }}.
+
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "rbacscope.fullname" . }} {{ .Values.service.port }}
+  open http://localhost:{{ .Values.service.port }}/report     # HTML report
+       http://localhost:{{ .Values.service.port }}/metrics    # Prometheus metrics
+{{- if .Values.networkPolicy.enabled }}
+
+The NetworkPolicy only admits traffic from: {{ .Values.networkPolicy.ingressFrom | toJson }}
+Make sure your Prometheus runs there, or set networkPolicy.ingressFrom.
+{{- end }}
+{{- if not .Values.scan.baselines }}
+
+Tip: on k3s, set scan.baselines={k3s} to hide RBAC that ships with the distribution.
+{{- end }}

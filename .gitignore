@@ -1,0 +1,4 @@
+/target
+# local audit logs copied from a cluster
+/k3s-audit.log
+/audit.log

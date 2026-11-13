@@ -1,0 +1,126 @@
+# rbacscope exporter: rescans cluster RBAC every 5 minutes and serves
+#   /metrics  Prometheus metrics (rbacscope_findings, rbacscope_escalation_paths, ...)
+#   /report   HTML report
+#
+#   kubectl apply -f deploy/kubernetes/rbacscope.yaml
+#   kubectl -n rbacscope port-forward svc/rbacscope 9090 && open http://localhost:9090/report
+#
+# The report reveals your cluster's weak spots: keep the Service ClusterIP-only and
+# restrict who can reach it (the NetworkPolicy below allows only the monitoring namespace).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: rbacscope
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: rbacscope
+  namespace: rbacscope
+automountServiceAccountToken: true
+---
+# Read-only, list-only. No Secrets. Pods are optional (improve exec/kubelet path precision;
+# rbacscope keeps only each pod's namespace, ServiceAccount and phase).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: rbacscope-reader
+rules:
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings", "clusterroles", "clusterrolebindings"]
+    verbs: ["list"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts", "pods"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: rbacscope-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: rbacscope-reader
+subjects:
+  - kind: ServiceAccount
+    name: rbacscope
+    namespace: rbacscope
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rbacscope
+  namespace: rbacscope
+  labels: {app.kubernetes.io/name: rbacscope}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: rbacscope}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: rbacscope}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: rbacscope
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: rbacscope
+          image: ghcr.io/arifcse21/rbacscope:0.5.0   # local k3s test: rbacscope:dev (see README)
+          imagePullPolicy: IfNotPresent
+          args:
+            - serve
+            - --listen=0.0.0.0:9090
+            - --interval=5m
+            # - --baseline=k3s                  # hide RBAC that ships with k3s
+          ports:
+            - {name: http, containerPort: 9090}
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 30
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {memory: 128Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rbacscope
+  namespace: rbacscope
+  labels: {app.kubernetes.io/name: rbacscope}
+spec:
+  type: ClusterIP
+  selector: {app.kubernetes.io/name: rbacscope}
+  ports:
+    - {name: http, port: 9090, targetPort: http}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: rbacscope
+  namespace: rbacscope
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: rbacscope}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: monitoring}
+      ports:
+        - {port: 9090}

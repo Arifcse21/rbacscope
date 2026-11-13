@@ -1,0 +1,107 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "rbacscope.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rbacscope.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "rbacscope.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "rbacscope.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/ignore: {{ toYaml .Values.scan.ignoreRules | sha256sum }}
+        {{- if .Values.prometheusScrapeAnnotations }}
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: /metrics
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "rbacscope.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: rbacscope
+          image: {{ include "rbacscope.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - serve
+            - --listen=0.0.0.0:9090
+            - --interval={{ .Values.scan.interval }}
+            {{- range .Values.scan.baselines }}
+            - --baseline={{ . }}
+            {{- end }}
+            {{- if .Values.scan.includeBuiltin }}
+            - --include-builtin
+            {{- end }}
+            {{- if not .Values.scan.includePods }}
+            - --no-pods
+            {{- end }}
+            {{- if .Values.scan.ignoreRules }}
+            - --ignore-file=/etc/rbacscope/rbacscope-ignore.yaml
+            {{- end }}
+            {{- range .Values.scan.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: 9090
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 30
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          {{- if .Values.scan.ignoreRules }}
+          volumeMounts:
+            - name: ignore
+              mountPath: /etc/rbacscope
+              readOnly: true
+          {{- end }}
+      {{- if .Values.scan.ignoreRules }}
+      volumes:
+        - name: ignore
+          configMap:
+            name: {{ include "rbacscope.fullname" . }}-ignore
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

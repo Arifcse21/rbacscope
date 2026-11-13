@@ -1,0 +1,9 @@
+# Release image: packages the static musl binaries built (and attested) by the release
+# workflow, so the image contains exactly the bytes users can verify. No compiler involved.
+# Local builds use ./Dockerfile instead.
+FROM scratch
+ARG TARGETARCH
+COPY dist/linux/${TARGETARCH}/rbacscope /rbacscope
+COPY LICENSE /LICENSE
+USER 65532:65532
+ENTRYPOINT ["/rbacscope"]

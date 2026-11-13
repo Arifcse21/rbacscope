@@ -1,0 +1,18 @@
+# Copy to .rbacscope-ignore.yaml in the directory you run rbacscope from
+# (it is picked up automatically), or pass --ignore-file PATH.
+#
+# Each entry needs at least one of rule / subject / binding. Globs use `*`.
+# Subjects use rbacscope's form: user:<name>, group:<name>, sa:<namespace>/<name>.
+# Bindings match the binding name, or <namespace>/<name> for RoleBindings.
+ignore:
+  - rule: RBAC004
+    subject: "sa:monitoring/prometheus"
+    reason: Prometheus reads TLS secrets for blackbox probes (ticket SEC-123)
+
+  - subject: "sa:argocd/*"
+    binding: "argocd-*"
+    reason: Argo CD manages the cluster; reviewed quarterly
+
+  - rule: RBAC015
+    binding: "legacy/*"
+    reason: legacy namespace is being decommissioned

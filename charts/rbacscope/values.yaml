@@ -1,0 +1,80 @@
+image:
+  repository: ghcr.io/arifcse21/rbacscope
+  # Defaults to the chart's appVersion.
+  tag: ""
+  # Pin by digest (recommended for production), e.g. sha256:abc...; overrides tag.
+  digest: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+scan:
+  # How often to rescan the cluster (30s, 5m, 1h).
+  interval: 5m
+  # Suppress RBAC that ships with a distribution, e.g. [k3s].
+  baselines: []
+  # Report built-in system:* bindings and control-plane identities (noisy).
+  includeBuiltin: false
+  # List pods so exec/kubelet escalation paths only target ServiceAccounts that really run.
+  # Only namespace, ServiceAccount and phase are kept. Disabling also drops the RBAC rule.
+  includePods: true
+  # Accepted findings, same schema as .rbacscope-ignore.yaml entries:
+  #   - rule: RBAC004
+  #     subject: "sa:monitoring/prometheus"
+  #     reason: reads TLS secrets for probes
+  ignoreRules: []
+  extraArgs: []
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+rbac:
+  # Read-only ClusterRole: list RBAC objects, ServiceAccounts and (optionally) Pods. Never Secrets.
+  create: true
+
+podAnnotations: {}
+podLabels: {}
+# Add prometheus.io/* scrape annotations (for annotation-based Prometheus discovery).
+prometheusScrapeAnnotations: true
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    memory: 128Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+priorityClassName: ""
+
+service:
+  type: ClusterIP
+  port: 9090
+
+networkPolicy:
+  enabled: true
+  # Peers allowed to reach /metrics and /report. The report shows your cluster's weak spots.
+  ingressFrom:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: monitoring
+
+serviceMonitor:
+  # Requires the Prometheus Operator CRDs.
+  enabled: false
+  interval: 1m
+  labels: {}
+
+prometheusRule:
+  # Requires the Prometheus Operator CRDs.
+  enabled: false
+  labels: {}
+  for: 15m
+  # Alert when no scan succeeded for this many seconds.
+  staleSeconds: 1800

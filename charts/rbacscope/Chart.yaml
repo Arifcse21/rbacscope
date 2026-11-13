@@ -1,0 +1,13 @@
+apiVersion: v2
+name: rbacscope
+description: Kubernetes RBAC risk exporter - risky grants, escalation paths to cluster-admin, Prometheus metrics and an HTML report
+type: application
+version: 0.5.0
+appVersion: "0.5.0"
+kubeVersion: ">=1.27.0-0"
+home: https://github.com/Arifcse21/rbacscope
+sources:
+  - https://github.com/Arifcse21/rbacscope
+keywords: [kubernetes, rbac, security, devsecops, prometheus]
+annotations:
+  artifacthub.io/license: Apache-2.0

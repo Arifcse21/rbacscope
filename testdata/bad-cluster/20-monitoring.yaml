@@ -1,0 +1,52 @@
+# Aggregated ClusterRole: the binding looks harmless, the aggregated rules are not.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: monitoring-aggregate
+aggregationRule:
+  clusterRoleSelectors:
+    - matchLabels:
+        rbac.example.com/aggregate-to-monitoring: "true"
+rules: []   # filled in by the controller (and by rbacscope)
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: monitoring-base
+  labels: {rbac.example.com/aggregate-to-monitoring: "true"}
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "nodes", "services", "endpoints"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: monitoring-secrets
+  labels: {rbac.example.com/aggregate-to-monitoring: "true"}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: monitoring}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: monitoring-aggregate}
+subjects:
+  - {kind: ServiceAccount, name: agent, namespace: monitoring}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: node-proxy}
+rules:
+  - apiGroups: [""]
+    resources: ["nodes/proxy"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: monitoring-node-proxy}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: node-proxy}
+subjects:
+  - {kind: ServiceAccount, name: agent, namespace: monitoring}

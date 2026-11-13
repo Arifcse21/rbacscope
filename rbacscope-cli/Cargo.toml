@@ -1,0 +1,31 @@
+[package]
+name = "rbacscope"
+description = "Kubernetes RBAC analyzer: risky permissions, who-can, and effective permissions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+keywords.workspace = true
+
+[[bin]]
+name = "rbacscope"
+path = "src/main.rs"
+
+[features]
+default = ["live"]
+# Read RBAC directly from a cluster and run the in-cluster exporter (`serve`).
+# Build with --no-default-features for a smaller, offline-only binary.
+live = ["dep:kube", "dep:k8s-openapi", "dep:tokio"]
+
+[dependencies]
+rbacscope-core.workspace = true
+rbacscope-report.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+kube = { workspace = true, optional = true }
+k8s-openapi = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }

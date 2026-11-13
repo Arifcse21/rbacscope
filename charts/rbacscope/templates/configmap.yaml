@@ -1,0 +1,12 @@
+{{- if .Values.scan.ignoreRules }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "rbacscope.fullname" . }}-ignore
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rbacscope.labels" . | nindent 4 }}
+data:
+  rbacscope-ignore.yaml: |
+    {{- toYaml (dict "ignore" .Values.scan.ignoreRules) | nindent 4 }}
+{{- end }}

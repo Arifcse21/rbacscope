@@ -1,0 +1,15 @@
+# Adds a cluster-admin ServiceAccount to rbacscopetest. On its own it looks like
+# "just an admin account", but debug-helper (can mint tokens in the namespace) and
+# the default SA (can create pods) can both become it.
+#   kubectl apply -f examples/k3s-test/escalation-chain.yaml
+#   kubectl delete -f examples/k3s-test/escalation-chain.yaml   # cleanup
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: ops-admin, namespace: rbacscopetest}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: rbacscopetest-ops-admin}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: cluster-admin}
+subjects:
+  - {kind: ServiceAccount, name: ops-admin, namespace: rbacscopetest}

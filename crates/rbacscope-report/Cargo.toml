@@ -1,0 +1,14 @@
+[package]
+name = "rbacscope-report"
+description = "Table and JSON reporters for rbacscope"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+rbacscope-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+comfy-table.workspace = true

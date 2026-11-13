@@ -1,0 +1,77 @@
+# Assorted human-access mistakes.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: oops-admin}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: cluster-admin}
+subjects:
+  - {apiGroup: rbac.authorization.k8s.io, kind: User, name: bob@example.com}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: debugger, namespace: prod}
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: developers-debug, namespace: prod}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: debugger}
+subjects:
+  - {apiGroup: rbac.authorization.k8s.io, kind: Group, name: developers}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: pod-manager, namespace: default}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: default-sa-pods, namespace: default}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: pod-manager}
+subjects:
+  - {kind: ServiceAccount, name: default}     # namespace inherited from the binding
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: legacy-access, namespace: prod}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: deleted-role}
+subjects:
+  - {apiGroup: rbac.authorization.k8s.io, kind: User, name: alice}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: impersonator}
+rules:
+  - apiGroups: [""]
+    resources: ["users", "groups"]
+    verbs: ["impersonate"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: support-impersonate}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: impersonator}
+subjects:
+  - {apiGroup: rbac.authorization.k8s.io, kind: User, name: support-bot}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: public-pods}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: anonymous-pods}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: public-pods}
+subjects:
+  - {apiGroup: rbac.authorization.k8s.io, kind: Group, name: "system:unauthenticated"}

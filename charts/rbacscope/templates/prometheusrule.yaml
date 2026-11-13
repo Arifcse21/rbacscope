@@ -1,0 +1,36 @@
+{{- if .Values.prometheusRule.enabled }}
+{{- $sel := printf "namespace=%q" .Release.Namespace }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "rbacscope.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rbacscope.labels" . | nindent 4 }}
+    {{- with .Values.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: rbacscope
+      rules:
+        - alert: RBACEscalationPathToClusterAdmin
+          expr: max(rbacscope_escalation_paths{ {{- $sel -}} }) > 0
+          for: {{ .Values.prometheusRule.for }}
+          labels: {severity: critical}
+          annotations:
+            summary: "{{ "{{" }} $value {{ "}}" }} subject(s) can escalate to cluster-admin"
+            description: "See the rbacscope /report page or run `rbacscope paths --live`."
+        - alert: RBACCriticalFindings
+          expr: sum(rbacscope_findings{ {{- $sel -}} ,severity="critical"}) > 0
+          for: {{ .Values.prometheusRule.for }}
+          labels: {severity: warning}
+          annotations:
+            summary: "{{ "{{" }} $value {{ "}}" }} critical RBAC finding(s)"
+        - alert: RBACScopeScanStale
+          expr: time() - max(rbacscope_last_success_timestamp_seconds{ {{- $sel -}} }) > {{ .Values.prometheusRule.staleSeconds }}
+          for: 5m
+          labels: {severity: warning}
+          annotations:
+            summary: "rbacscope has not completed a scan in {{ .Values.prometheusRule.staleSeconds }}s"
+{{- end }}

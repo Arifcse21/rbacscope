@@ -1,0 +1,18 @@
+# Audit policy for rbacscope: request metadata only (who, verb, resource, name,
+# namespace, decision). Metadata level never records request/response bodies,
+# so Secret contents are not written to the log.
+apiVersion: audit.k8s.io/v1
+kind: Policy
+omitStages:
+  - RequestReceived
+rules:
+  # Health probes are noise.
+  - level: None
+    nonResourceURLs: ["/healthz*", "/livez*", "/readyz*"]
+  # Leader-election lease renewals are constant and irrelevant to RBAC design.
+  - level: None
+    verbs: ["get", "update"]
+    resources:
+      - group: coordination.k8s.io
+        resources: ["leases"]
+  - level: Metadata

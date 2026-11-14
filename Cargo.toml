@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/rbacscope-core", "crates/rbacscope-report", "rbacscope-cli"]
 
 [workspace.package]
-version = "0.6.1"
+version = "0.6.2"
 edition = "2021"
 license = "Apache-2.0"
 rust-version = "1.95"
@@ -11,8 +11,8 @@ repository = "https://github.com/Arifcse21/rbacscope"
 keywords = ["kubernetes", "rbac", "security", "devsecops"]
 
 [workspace.dependencies]
-rbacscope-core = { path = "crates/rbacscope-core", version = "0.6.1" }
-rbacscope-report = { path = "crates/rbacscope-report", version = "0.6.1" }
+rbacscope-core = { path = "crates/rbacscope-core", version = "0.6.2" }
+rbacscope-report = { path = "crates/rbacscope-report", version = "0.6.2" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"

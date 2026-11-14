@@ -154,7 +154,7 @@ jobs:
     permissions: { contents: read, security-events: write }
     steps:
       - uses: actions/checkout@v4
-      - uses: Arifcse21/rbacscope@v0.6.1
+      - uses: Arifcse21/rbacscope@v0.6.2
         id: rbacscope
         with:
           path: deploy/

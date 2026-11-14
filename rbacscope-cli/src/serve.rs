@@ -640,6 +640,24 @@ async fn handle_audit<S: AsyncRead + AsyncWrite + Unpin>(
     respond(&mut stream, status, TEXT, msg.as_bytes()).await;
 }
 
+/// Resolves on SIGTERM (what Kubernetes sends) on Unix, or Ctrl-C on Windows (no SIGTERM there).
+fn shutdown_signal() -> Result<impl std::future::Future<Output = ()>> {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut term = signal(SignalKind::terminate()).context("installing SIGTERM handler")?;
+        Ok(async move {
+            term.recv().await;
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
+    }
+}
+
 fn tls_acceptor(cert: &Path, key: &Path) -> Result<TlsAcceptor> {
     let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(cert)
         .with_context(|| format!("reading {}", cert.display()))?
@@ -677,8 +695,7 @@ async fn serve(opts: ServeOptions) -> Result<()> {
     );
 
     // PID 1 in a container ignores SIGTERM unless a handler is installed.
-    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .context("installing SIGTERM handler")?;
+    let shutdown = shutdown_signal()?;
 
     let audit_store = match &opts.audit {
         None => None,
@@ -756,7 +773,7 @@ async fn serve(opts: ServeOptions) -> Result<()> {
     {
         let (store, opts) = (audit_store.clone(), opts.clone());
         tokio::spawn(async move {
-            term.recv().await;
+            shutdown.await;
             // Keep collected usage across restarts.
             if let (Some(store), Some(aopts)) = (store, &opts.audit) {
                 if let Some(path) = &aopts.state_path {
@@ -767,7 +784,7 @@ async fn serve(opts: ServeOptions) -> Result<()> {
                     }
                 }
             }
-            eprintln!("SIGTERM received, exiting");
+            eprintln!("shutdown signal received, exiting");
             std::process::exit(0);
         });
     }

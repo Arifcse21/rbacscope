@@ -36,7 +36,8 @@ jobs:
   binaries:
     needs: preflight
     strategy:
-      fail-fast: true
+      # Let every platform finish so one failure doesn't hide the others' results.
+      fail-fast: false
       matrix:
         include:
           - { target: x86_64-unknown-linux-musl, os: ubuntu-24.04 }

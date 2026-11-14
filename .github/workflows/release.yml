@@ -148,6 +148,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: azure/setup-helm@v4
       - uses: sigstore/cosign-installer@v3
+      # cosign reads Docker's credential store; `helm registry login` alone isn't enough
+      # to push the chart signature.
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Package, push and sign chart
         env:
           GH_ACTOR: ${{ github.actor }}

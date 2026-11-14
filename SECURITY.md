@@ -18,7 +18,7 @@ Only the latest minor release is supported with security fixes.
 Every artifact is signed keylessly with [Sigstore](https://www.sigstore.dev/) from the GitHub Actions release workflow, and has SLSA build provenance. Replace the version below.
 
 ```sh
-VERSION=v0.6.2
+VERSION=v0.6.3
 IDENTITY='^https://github.com/Arifcse21/rbacscope/\.github/workflows/release\.yml@refs/tags/v.*$'
 ISSUER=https://token.actions.githubusercontent.com
 

@@ -74,7 +74,7 @@ spec:
         seccompProfile: {type: RuntimeDefault}
       containers:
         - name: rbacscope
-          image: ghcr.io/arifcse21/rbacscope:0.6.3   # local k3s test: rbacscope:dev (see README)
+          image: ghcr.io/arifcse21/rbacscope:0.6.4   # local k3s test: rbacscope:dev (see README)
           imagePullPolicy: IfNotPresent
           args:
             - serve

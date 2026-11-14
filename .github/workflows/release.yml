@@ -117,6 +117,9 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
       - id: build
         uses: docker/build-push-action@v6
+        env:
+          # Don't attach the build record as a workflow artifact (nothing uses it).
+          DOCKER_BUILD_RECORD_UPLOAD: "false"
         with:
           context: .
           file: Dockerfile.release
@@ -188,10 +191,17 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@v4
+      # Download only our artifacts by name: the run also contains a docker build
+      # record that download-artifact cannot extract.
       - uses: actions/download-artifact@v4
         with:
+          pattern: bin-*
           path: artifacts
           merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: chart
+          path: artifacts
       - name: Collect release files
         run: |
           mkdir dist
